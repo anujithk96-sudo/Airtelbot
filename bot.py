@@ -2,6 +2,8 @@ import asyncio
 import os
 import re
 import subprocess
+import sys
+import time
 from urllib.parse import urlparse
 from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -11,6 +13,7 @@ API_ID = int(os.environ.get("API_ID", "0").strip() or "0")
 API_HASH = os.environ.get("API_HASH", "").strip()
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 DOWNLOAD_DIR = os.environ.get("DOWNLOAD_DIR", "./downloads").strip()
+THUMB_DIR = os.environ.get("THUMB_DIR", "./thumbnails").strip()
 COOKIE_FILE = os.environ.get("COOKIE_FILE", "cookies.txt").strip()
 AIRTEL_BEARER_TOKEN = os.environ.get("AIRTEL_BEARER_TOKEN", "").strip()
 
@@ -27,9 +30,11 @@ app = Client(
     bot_token=BOT_TOKEN,
 )
 
-# യൂസറുടെ അവസാനത്തെ ഷോ ലിങ്ക്, പെൻഡിംഗ് ക്യൂ എന്നിവ സൂക്ഷിക്കാൻ
+# യൂസറുടെ ഡാറ്റ, സെറ്റിംഗ്സ്, പെൻഡിംഗ് ജോബുകൾ, ക്യാൻസൽ റിക്വസ്റ്റുകൾ
 USER_SHOWS: dict[int, dict] = {}
+USER_SETTINGS: dict[int, dict] = {}
 PENDING_JOBS: dict[str, dict] = {}
+CANCEL_REQUESTS: set[int] = set()
 
 RANGE_PATTERN = re.compile(r"^/(\d+):(\d+)(?:-(\d+))?$")
 
@@ -47,89 +52,176 @@ QUALITY_OPTIONS = {
 }
 
 
-def build_quality_keyboard(job_id: str) -> InlineKeyboardMarkup:
+def get_user_settings(user_id: int) -> dict:
+  if user_id not in USER_SETTINGS:
+    USER_SETTINGS[user_id] = {
+        "auto_thumb": True,
+        "custom_thumb": None,
+        "custom_name": None,
+        "mp3_quality": "192K",
+    }
+  return USER_SETTINGS[user_id]
+
+
+def build_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
+  s = get_user_settings(user_id)
+  auto_thumb_label = (
+      "✅ Auto Thumb: ON" if s["auto_thumb"] else "❌ Auto Thumb: OFF"
+  )
+  custom_thumb_label = (
+      "🖼️ Custom Thumb: Set"
+      if s["custom_thumb"]
+      else "🖼️ Custom Thumb: None"
+  )
+  custom_name_label = (
+      f"✏️ Name: {s['custom_name']}"
+      if s["custom_name"]
+      else "✏️ Custom Name: Default"
+  )
+  mp3_label = f"🎵 MP3 Bitrate: {s['mp3_quality']}"
   return InlineKeyboardMarkup([
       [
-          InlineKeyboardButton("144p", callback_data=f"dl|{job_id}|144p"),
-          InlineKeyboardButton("240p", callback_data=f"dl|{job_id}|240p"),
-          InlineKeyboardButton("360p", callback_data=f"dl|{job_id}|360p"),
+          InlineKeyboardButton(
+              auto_thumb_label, callback_data="set|toggle_autothumb"
+          )
       ],
       [
-          InlineKeyboardButton("480p", callback_data=f"dl|{job_id}|480p"),
-          InlineKeyboardButton("720p", callback_data=f"dl|{job_id}|720p"),
-          InlineKeyboardButton("1080p", callback_data=f"dl|{job_id}|1080p"),
+          InlineKeyboardButton(
+              custom_thumb_label, callback_data="set|clear_thumb"
+          )
       ],
       [
-          InlineKeyboardButton("🎵 MP3 Audio", callback_data=f"dl|{job_id}|mp3"),
+          InlineKeyboardButton(
+              custom_name_label, callback_data="set|clear_name"
+          )
       ],
+      [InlineKeyboardButton(mp3_label, callback_data="set|toggle_mp3")],
+      [InlineKeyboardButton("🔍 Check Cookies", callback_data="set|cookies")],
   ])
 
 
+def format_settings_text(user_id: int) -> str:
+  s = get_user_settings(user_id)
+  show = USER_SHOWS.get(user_id)
+  show_txt = show["slug"] if show else "None"
+  return (
+      "⚙️ **Airtel Bot Settings**\n\n"
+      f"• **Active Show:** `{show_txt}`\n"
+      f"• **Auto Thumbnail:** `{'ON' if s['auto_thumb'] else 'OFF'}`\n"
+      f"• **Custom Thumbnail:** `{'Set' if s['custom_thumb'] else 'Not set'}`"
+      " (ഫോട്ടോ അയച്ചാൽ തംബ്നെയിൽ ആയി സെറ്റ് ആകും)\n"
+      f"• **Custom Name:** `{s['custom_name'] or 'Default'}` (ലിങ്കിനൊപ്പം `-n"
+      " പേര്` എന്ന് അയച്ചും സെറ്റ് ചെയ്യാം)\n"
+      f"• **MP3 Bitrate:** `{s['mp3_quality']}`\n"
+      f"• **Download Dir:** `{DOWNLOAD_DIR}`"
+  )
+
+
+def build_quality_keyboard(job_id: str, user_id: int, selected=None) -> InlineKeyboardMarkup:
+  selected = set(selected or [])
+  rows = []
+  keys = ["144p", "240p", "360p", "480p", "720p", "1080p"]
+  for i in range(0, len(keys), 3):
+    rows.append([
+        InlineKeyboardButton(
+            ("✅ " if key in selected else "") + key,
+            callback_data=f"pick|{job_id}|{key}",
+        ) for key in keys[i:i + 3]
+    ])
+  rows.append([InlineKeyboardButton(
+      ("✅ " if "mp3" in selected else "") + "🎵 MP3 Audio",
+      callback_data=f"pick|{job_id}|mp3",
+  )])
+  rows.append([
+      InlineKeyboardButton("❌ Cancel Task", callback_data=f"cancel_job|{job_id}|{user_id}"),
+      InlineKeyboardButton("Submit", callback_data=f"submit|{job_id}"),
+  ])
+  return InlineKeyboardMarkup(rows)
+
+
 def check_cookies_file(cookie_path: str) -> tuple[bool, str]:
-  """
-    cookies.txt ഫയൽ നിലവിലുണ്ടോ, ഫയൽ തന്നെയാണോ, കാലിയല്ലയോ എന്ന് പരിശോധിക്കുന്നു.
-    """
   if not cookie_path:
     return False, "COOKIE_FILE പാത്ത് നൽകിയിട്ടില്ല."
-
   if os.path.isdir(cookie_path):
     return (
         False,
         f"`{cookie_path}` ഒരു ഫോൾഡർ ആയി കിടക്കുന്നു! അതൊരു ഫയൽ ആയിരിക്കണം.",
     )
-
   if not os.path.exists(cookie_path):
     return False, f"`{cookie_path}` ഫയൽ കണ്ടെത്താൻ കഴിഞ്ഞില്ല."
-
   size = os.path.getsize(cookie_path)
   if size == 0:
     return (
         False,
         f"`{cookie_path}` ഫയൽ കാലിയാണ് (0 bytes). കുക്കീസ് പേസ്റ്റ് ചെയ്യുക.",
     )
-
   return True, f"`{cookie_path}` ഫയൽ ലഭ്യമാണ് ({size} bytes)."
 
 
-def extract_xstream_info(url: str) -> dict | None:
-  parsed = urlparse(url.strip())
-  if parsed.scheme not in ("http", "https") or "airtelxstream.in" not in parsed.netloc:
+def extract_airtel_info(url: str) -> dict | None:
+  cleaned = url.strip().rstrip(".,)")
+  parsed = urlparse(cleaned)
+  host = parsed.netloc.lower()
+  if parsed.scheme not in ("http", "https") or (
+      "airtelxstream.in" not in host and "airtel.in" not in host
+  ):
     return None
   parts = [p for p in parsed.path.split("/") if p]
-  if len(parts) < 3:
-    return None
+  slug = parts[1] if len(parts) >= 2 else (parts[0] if parts else "airtel_media")
+  content_id = parts[2] if len(parts) >= 3 else None
   return {
-      "url": url.strip(),
-      "category": parts[0],
-      "slug": parts[1],
-      "content_id": parts[2],
-      "tail": parts[3] if len(parts) > 3 else None,
+      "url": cleaned,
+      "category": parts[0] if parts else "stream",
+      "slug": slug,
+      "content_id": content_id,
   }
 
 
 def parse_episode_command(text: str) -> dict | None:
-  """
-    /1:1-10 -> season=1, episodes=[1..10]
-    /1:5    -> season=1, episodes=[5]
-    """
   match = RANGE_PATTERN.match(text.strip())
   if not match:
     return None
-
   season = int(match.group(1))
   start_ep = int(match.group(2))
   end_ep = int(match.group(3)) if match.group(3) else start_ep
-
   if season < 1 or start_ep < 1 or end_ep < start_ep:
     return None
-
   return {
       "season": season,
       "episodes": list(range(start_ep, end_ep + 1)),
   }
 
 
-def run_yt_dlp(url: str, out_file: str, quality_key: str) -> tuple[bool, str]:
+def generate_thumbnail(video_path: str, user_id: int) -> str | None:
+  os.makedirs(THUMB_DIR, exist_ok=True)
+  thumb_path = os.path.join(THUMB_DIR, f"auto_{user_id}.jpg")
+  try:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        "00:00:05",
+        "-i",
+        video_path,
+        "-vframes",
+        "1",
+        "-q:v",
+        "2",
+        thumb_path,
+    ]
+    subprocess.run(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30
+    )
+    if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 0:
+      return thumb_path
+  except Exception:
+    pass
+  return None
+
+
+def run_yt_dlp(
+    url: str, out_file: str, quality_key: str, mp3_bitrate: str = "192K"
+) -> tuple[bool, str]:
   os.makedirs(os.path.dirname(out_file), exist_ok=True)
 
   cookie_ok, cookie_msg = check_cookies_file(COOKIE_FILE)
@@ -163,7 +255,7 @@ def run_yt_dlp(url: str, out_file: str, quality_key: str) -> tuple[bool, str]:
         "--audio-format",
         "mp3",
         "--audio-quality",
-        "192K",
+        mp3_bitrate,
     ])
   else:
     cmd.extend([
@@ -191,17 +283,59 @@ def run_yt_dlp(url: str, out_file: str, quality_key: str) -> tuple[bool, str]:
     return False, "സമയപരിധി കഴിഞ്ഞു (Timeout)."
 
 
+async def create_and_send_quality_menu(
+    message: Message, user_id: int, show: dict, season: int, episodes: list[int]
+):
+  job_id = f"{user_id}_{message.id}_{int(time.time())}"
+  PENDING_JOBS[job_id] = {
+      "user_id": user_id,
+      "show": show,
+      "season": season,
+      "episodes": episodes,
+      "selected": set(),
+  }
+  ep_label = (
+      f"E{episodes[0]}" if len(episodes) == 1 else f"E{episodes[0]}–E{episodes[-1]}"
+  )
+  await message.reply_text(
+      f"🎬 **Airtel Link Detected:** `{show['slug']}`\n"
+      f"📺 **Season {season}** ({ep_label})\n\n"
+      "ക്വാളിറ്റി അല്ലെങ്കിൽ **MP3 Audio** തിരഞ്ഞെടുക്കുക:",
+      reply_markup=build_quality_keyboard(job_id, user_id),
+  )
+
+
 @app.on_message(filters.command("start") & filters.private)
 async def start_cmd(_, message: Message):
   await message.reply_text(
-      "നമസ്കാരം!\n"
-      "1. ആദ്യം Airtel Xstream ഷോ ലിങ്ക് അയക്കുക.\n"
-      "2. പിന്നാലെ സീസണും എപ്പിസോഡും അയക്കുക:\n"
-      "   • `/1:1-10` → Season 1-ലെ 1 മുതൽ 10 വരെ എപ്പിസോഡുകൾ\n"
-      "   • `/1:5` → Season 1-ലെ 5-ാമത്തെ എപ്പിസോഡ് മാത്രം\n"
-      "3. ബട്ടണിൽ നിന്ന് `144p`–`1080p` അല്ലെങ്കിൽ `MP3 Audio` തിരഞ്ഞെടുക്കുക.\n"
-      "4. `/checkcookies` → `cookies.txt` ഉണ്ടോ എന്ന് പരിശോധിക്കാൻ"
+      "ഹായ്, ഞാൻ Airtel വീഡിയോ ഡൗൺലോഡ് ബോട്ടാണ്!\n\n"
+      "📌 **എങ്ങനെ ഉപയോഗിക്കാം:**\n"
+      "• Airtel ലിങ്ക് അയച്ചാൽ ഓട്ടോമാറ്റിക്കായി ഡിറ്റക്ട് ചെയ്ത് ക്വാളിറ്റി"
+      " ബട്ടൺസ് വരും.\n"
+      "• ഷോ ലിങ്ക് സേവ് ചെയ്ത ശേഷം `/1:1-10` (Season 1, Ep 1–10) അല്ലെങ്കിൽ"
+      " `/1:5` (Season 1, Ep 5) എന്ന് അയക്കാം.\n"
+      "• ലിങ്കിനൊപ്പം `-n പേര്` ചേർത്ത് കസ്റ്റം പേര് നൽകാം.\n\n"
+      "⚙️ **കമാൻഡുകൾ:**\n"
+      "• `/start` — സ്വാഗത സന്ദേശം\n"
+      "• `/settings` — ബോട്ട് സെറ്റിംഗ്സ്\n"
+      "• `/restart` — ബോട്ട് റീസ്റ്റാർട്ട് ചെയ്യാൻ\n"
+      "• `/checkcookies` — `cookies.txt` പരിശോധിക്കാൻ"
   )
+
+
+@app.on_message(filters.command("settings") & filters.private)
+async def settings_cmd(_, message: Message):
+  user_id = message.from_user.id if message.from_user else 0
+  await message.reply_text(
+      format_settings_text(user_id),
+      reply_markup=build_settings_keyboard(user_id),
+  )
+
+
+@app.on_message(filters.command("restart") & filters.private)
+async def restart_cmd(_, message: Message):
+  await message.reply_text("🔄 ബോട്ട് റീസ്റ്റാർട്ട് ചെയ്യുന്നു...")
+  os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 @app.on_message(filters.command("checkcookies") & filters.private)
@@ -211,21 +345,44 @@ async def check_cookies_cmd(_, message: Message):
   await message.reply_text(f"{icon} {msg}")
 
 
+@app.on_message(filters.photo & filters.private)
+async def photo_thumb_handler(_, message: Message):
+  user_id = message.from_user.id if message.from_user else 0
+  os.makedirs(THUMB_DIR, exist_ok=True)
+  thumb_path = os.path.join(THUMB_DIR, f"custom_{user_id}.jpg")
+  await message.download(file_name=thumb_path)
+  s = get_user_settings(user_id)
+  s["custom_thumb"] = thumb_path
+  await message.reply_text("✅ Custom Thumbnail സേവ് ചെയ്തു!")
+
+
 @app.on_message(filters.text & filters.private)
 async def text_handler(_, message: Message):
   text = (message.text or "").strip()
   user_id = message.from_user.id if message.from_user else 0
+  s = get_user_settings(user_id)
 
-  # ലിങ്ക് ആണോ എന്ന് പരിശോധിക്കുന്നു
-  if text.startswith(("http://", "https://")):
-    info = extract_xstream_info(text)
+  # ലിങ്ക് ഓട്ടോ-ഡിറ്റക്ഷൻ (Airtel ലിങ്ക് ആണോ എന്ന് പരിശോധിക്കുന്നു)
+  url_match = re.search(r"https?://[^\s]+", text)
+  if url_match:
+    raw_url = url_match.group(0)
+    info = extract_airtel_info(raw_url)
     if not info:
-      await message.reply_text("❌ സാധുവായ Airtel Xstream ലിങ്ക് അയക്കുക.")
+      await message.reply_text("❌ സാധുവായ Airtel ലിങ്ക് അയക്കുക.")
       return
+
+    name_match = re.search(
+        r"(?:^|\s)-n(?:\s+|=)(.+?)\s*$", text, flags=re.IGNORECASE
+    )
+    if name_match:
+      clean_name = re.sub(
+          r'[\\/:*?"<>|]+', "_", name_match.group(1).strip()
+      ).strip()
+      s["custom_name"] = clean_name or None
+
     USER_SHOWS[user_id] = info
-    await message.reply_text(
-        f"✅ ഷോ സേവ് ചെയ്തു: `{info['slug']}`\n"
-        "ഇനി `/1:1-10` അല്ലെങ്കിൽ `/1:5` പോലെ അയക്കുക."
+    await create_and_send_quality_menu(
+        message, user_id, info, season=1, episodes=[1]
     )
     return
 
@@ -235,7 +392,7 @@ async def text_handler(_, message: Message):
     show = USER_SHOWS.get(user_id)
     if not show:
       await message.reply_text(
-          "⚠️ ആദ്യം ഷോ ലിങ്ക് അയക്കുക, എന്നിട്ട് `/1:1-10` പോലെ അയക്കുക."
+          "⚠️ ആദ്യം Airtel ഷോ ലിങ്ക് അയക്കുക, എന്നിട്ട് `/1:1-10` പോലെ അയക്കുക."
       )
       return
 
@@ -244,88 +401,65 @@ async def text_handler(_, message: Message):
       await message.reply_text(f"❌ {cookie_msg}")
       return
 
-    job_id = f"{user_id}_{message.id}"
-    PENDING_JOBS[job_id] = {
-        "user_id": user_id,
-        "show": show,
-        "season": parsed["season"],
-        "episodes": parsed["episodes"],
-    }
-
-    ep_label = (
-        f"E{parsed['episodes'][0]}"
-        if len(parsed["episodes"]) == 1
-        else f"E{parsed['episodes'][0]}–E{parsed['episodes'][-1]}"
-    )
-
-    await message.reply_text(
-        f"🎬 **Show:** `{show['slug']}`\n"
-        f"📺 **Season {parsed['season']}** ({ep_label})\n\n"
-        "ക്വാളിറ്റി അല്ലെങ്കിൽ **MP3 Audio** തിരഞ്ഞെടുക്കുക:",
-        reply_markup=build_quality_keyboard(job_id),
+    await create_and_send_quality_menu(
+        message, user_id, show, parsed["season"], parsed["episodes"]
     )
     return
 
   await message.reply_text(
-      "ലിങ്ക് അല്ലെങ്കിൽ `/1:1-10` / `/1:5` എന്ന ഫോർമാറ്റിൽ കമാൻഡ് അയക്കുക."
+      "Airtel ലിങ്ക് അല്ലെങ്കിൽ `/1:1-10` / `/1:5` എന്ന ഫോർമാറ്റിൽ കമാൻഡ് അയക്കുക."
   )
 
 
-@app.on_callback_query(filters.regex(r"^dl\|"))
-async def quality_callback(_, callback: CallbackQuery):
-  try:
-    _, job_id, quality_key = callback.data.split("|", 2)
-  except ValueError:
-    await callback.answer("Invalid selection", show_alert=True)
-    return
+@app.on_callback_query(filters.regex(r"^set\|"))
+async def settings_callback(_, callback: CallbackQuery):
+  user_id = callback.from_user.id if callback.from_user else 0
+  s = get_user_settings(user_id)
+  action = callback.data.split("|", 1)[1]
 
-  job = PENDING_JOBS.get(job_id)
-  if not job:
+  if action == "toggle_autothumb":
+    s["auto_thumb"] = not s["auto_thumb"]
     await callback.answer(
-        "ഈ ഓപ്ഷൻ കാലഹരണപ്പെട്ടു. വീണ്ടും കമാൻഡ് അയക്കുക.", show_alert=True
+        f"Auto Thumbnail: {'ON' if s['auto_thumb'] else 'OFF'}"
     )
+  elif action == "clear_thumb":
+    if s["custom_thumb"] and os.path.exists(s["custom_thumb"]):
+      try:
+        os.remove(s["custom_thumb"])
+      except OSError:
+        pass
+    s["custom_thumb"] = None
+    await callback.answer("Custom Thumbnail നീക്കം ചെയ്തു.")
+  elif action == "clear_name":
+    s["custom_name"] = None
+    await callback.answer("Custom Name റീസെറ്റ് ചെയ്തു.")
+  elif action == "toggle_mp3":
+    s["mp3_quality"] = "320K" if s["mp3_quality"] == "192K" else "192K"
+    await callback.answer(f"MP3 Bitrate: {s['mp3_quality']}")
+  elif action == "cookies":
+    ok, msg = check_cookies_file(COOKIE_FILE)
+    await callback.answer(msg, show_alert=True)
     return
 
-  if callback.from_user and callback.from_user.id != job["user_id"]:
-    await callback.answer(
-        "ഇത് നിങ്ങളുടെ റിക്വസ്റ്റ് അല്ല.", show_alert=True
-    )
-    return
-
-  if quality_key not in QUALITY_OPTIONS:
-    await callback.answer("Unknown quality", show_alert=True)
-    return
-
-  q_label, _ = QUALITY_OPTIONS[quality_key]
-  await callback.answer(f"{q_label} തിരഞ്ഞെടുത്തു...")
-
-  show = job["show"]
-  season = job["season"]
-  episodes = job["episodes"]
-
-  status_msg = await callback.message.edit_text(
-      f"⏳ **Season {season}** — {len(episodes)} എപ്പിസോഡ് (`{q_label}`) "
-      "ഡൗൺലോഡ് ചെയ്യുന്നു..."
+  await callback.message.edit_text(
+      format_settings_text(user_id),
+      reply_markup=build_settings_keyboard(user_id),
   )
 
-  results = []
-  for ep in episodes:
-    folder_tag = "MP3" if quality_key == "mp3" else quality_key
-    ext_template = "%(ext)s" if quality_key == "mp3" else "mp4"
-    out_path = os.path.join(
-        DOWNLOAD_DIR,
-        show["slug"],
-        f"S{season:02d}",
-        folder_tag,
-        f"E{ep:02d}.{ext_template}",
-    )
-    ok, msg = await asyncio.to_thread(
-        run_yt_dlp, show["url"], out_path, quality_key
-    )
-    icon = "✅" if ok else "❌"
-    results.append(f"{icon} S{season}E{ep} [{q_label}]: {msg}")
-    if len(results) % 3 == 0 or ep == episodes[-1]:
-      await status_msg.edit_text("\n".join(results[-10:]))
+
+@app.on_callback_query(filters.regex(r"^cancel_job\|"))
+async def cancel_job_callback(_, callback: CallbackQuery):
+  parts = callback.data.split("|")
+  job_id = parts[1] if len(parts) > 1 else ""
+  target_uid = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+  req_uid = callback.from_user.id if callback.from_user else 0
+  if req_uid != target_uid:
+    await callback.answer("ഇത് നിങ്ങളുടെ റിക്വസ്റ്റ് അല്ല.", show_alert=True)
+    return
+  CANCEL_REQUESTS.add(req_uid)
+  PENDING_JOBS.pop(job_id, None)
+  await callback.message.edit_text("❌ ടാസ്ക് ക്യാൻസൽ ചെയ്തു.")
+  await callback.answer("Cancelled")
 
 
 if __name__ == "__main__":
