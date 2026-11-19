@@ -1,0 +1,15 @@
+# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
+
+.airtelxstream.in	TRUE	/	FALSE	1829484185	_ga	GA1.1.893800827.1794914359
+.airtelxstream.in	TRUE	/	FALSE	1802700283	_fbp	fb.1.1794914367290.81444993321113830
+.airtelxstream.in	TRUE	/	FALSE	1826450367	_clck	1aernlr%5E2%5Egb8%5E0%5E2512
+www.airtelxstream.in	FALSE	/	FALSE	1795096982	isloggedin	true
+.airtelxstream.in	TRUE	/	FALSE	1802690359	_gcl_au	1.1.328283021.1794914359.-.-.1794923777.1251349120.1794923777.1794923777
+.airtelxstream.in	TRUE	/	FALSE	1795010660	_uetsid	c052fb10e27811f196816d9cbcf2fa46
+.airtelxstream.in	TRUE	/	FALSE	1828620260	_uetvid	c0545e40e27811f181c0017651815ec6
+.airtelxstream.in	TRUE	/	FALSE	1829484278	_ga_HBN8NLETK0	GS2.1.s1794923777$o3$g1$t1794924277$j60$l0$h0
+.airtelxstream.in	TRUE	/	FALSE	1829484278	_ga_Y0QLY0Z204	GS2.1.s1794923776$o3$g1$t1794924277$j26$l0$h790667750
+.airtelxstream.in	TRUE	/	FALSE	1829484283	_ga_DX0LKK839K	GS2.1.s1794923777$o3$g1$t1794924283$j20$l0$h0
+.airtelxstream.in	TRUE	/	FALSE	1795010683	_clsk	tphm7k%5E1794924283702%5E7%5E0%5Ej.clarity.ms%2Fcollect
